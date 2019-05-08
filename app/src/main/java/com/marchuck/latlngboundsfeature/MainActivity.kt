@@ -8,6 +8,10 @@ import com.mapbox.mapboxsdk.geometry.LatLngBounds
 import com.mapbox.mapboxsdk.maps.MapView
 import com.mapbox.mapboxsdk.maps.MapboxMap
 import com.mapbox.mapboxsdk.maps.Style
+import io.reactivex.android.schedulers.AndroidSchedulers
+import io.reactivex.functions.Consumer
+import io.reactivex.subjects.PublishSubject
+import java.util.concurrent.TimeUnit
 
 /**
  * @author Lukasz Marczak
@@ -19,7 +23,7 @@ class MainActivity : AppCompatActivity() {
 
     private var mapView: MapView? = null
     private var mapboxMap: MapboxMap? = null
-
+    private val subject: PublishSubject<Boolean> = PublishSubject.create()
 
     private val mapClickListener = MapboxMap.OnMapClickListener {
         System.err.println("clicked (${it.latitude},${it.longitude})")
@@ -49,7 +53,7 @@ class MainActivity : AppCompatActivity() {
             val bounds = generateUkBounds(edgeCoordinates)
 
             mapboxMap.setLatLngBoundsForCameraTarget(bounds)
-            zoomToUkIfNotZoomed(mapboxMap,bounds)
+            zoomToUkIfNotZoomed(mapboxMap, bounds)
 
             mapboxMap.addOnMapClickListener(mapClickListener)
 
@@ -68,15 +72,29 @@ class MainActivity : AppCompatActivity() {
             mapboxMap.addOnCameraMoveStartedListener {
                 zoomToUkIfNotZoomed(mapboxMap, bounds)
             }
+
+            //todo: persist zoom data
+            subject.throttleFirst(100, TimeUnit.MILLISECONDS)
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe({
+                    if (it) {
+                        mapboxMap.easeCamera(CameraUpdateFactory.newLatLngBounds(bounds, 0), 100)
+                    }
+                }, {
+
+                })
         }
     }
 
     private fun zoomToUkIfNotZoomed(mapboxMap: MapboxMap, bounds: LatLngBounds) {
-        val centerLatLng = mapboxMap.projection.visibleRegion.latLngBounds.center
-        System.err.println("camera moved to ${centerLatLng.latitude}/${centerLatLng.longitude}")
-        if (!bounds.contains(centerLatLng)) {
-            mapboxMap.easeCamera(CameraUpdateFactory.newLatLngBounds(bounds, 0), 100)
-        }
+        val t = shouldZoomToBounds(mapboxMap, bounds)
+        subject.onNext(t)
+    }
+
+    private fun shouldZoomToBounds(mapboxMap: MapboxMap, bounds: LatLngBounds): Boolean {
+        val visibleBounds = mapboxMap.projection.visibleRegion.latLngBounds
+
+        return !bounds.contains(visibleBounds)
     }
 
 
