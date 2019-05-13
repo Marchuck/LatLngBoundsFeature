@@ -2,7 +2,7 @@ package com.marchuck.latlngboundsfeature.domain
 
 import com.mapbox.mapboxsdk.offline.OfflineManager
 import com.mapbox.mapboxsdk.offline.OfflineRegion
-import com.marchuck.latlngboundsfeature.domain.exceptions.OfflineRegionsFetchException
+import com.marchuck.latlngboundsfeature.domain.exceptions.GetRegionsException
 import io.reactivex.Single
 
 typealias OfflineRegions = ArrayList<OfflineRegion>
@@ -28,7 +28,7 @@ class GetRegionsUseCase(val offlineManager: OfflineManager) {
 
                 override fun onError(error: String?) {
                     emitter.onError(
-                        OfflineRegionsFetchException(
+                        GetRegionsException(
                             error
                         )
                     )

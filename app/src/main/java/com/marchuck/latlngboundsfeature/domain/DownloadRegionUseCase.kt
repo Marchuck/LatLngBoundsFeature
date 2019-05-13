@@ -1,8 +1,7 @@
 package com.marchuck.latlngboundsfeature.domain
 
 import com.mapbox.mapboxsdk.offline.*
-import com.marchuck.latlngboundsfeature.domain.exceptions.CreateOfflineRegionException
-import com.marchuck.latlngboundsfeature.domain.exceptions.OfflineRegionErrorException
+import com.marchuck.latlngboundsfeature.domain.exceptions.RegionDownloadException
 import io.reactivex.Observable
 import io.reactivex.ObservableEmitter
 import io.reactivex.subjects.BehaviorSubject
@@ -10,23 +9,22 @@ import org.json.JSONObject
 import timber.log.Timber
 import java.nio.charset.Charset
 
-class DownloadRegionUseCase(val offlineManager: OfflineManager) {
+/**
+ * todo: check if it works with process kill
+ */
+class DownloadRegionUseCase(private val offlineManager: OfflineManager,
+                            private val getRegionsUseCase: GetRegionsUseCase) {
 
     companion object {
-        // JSON encoding/decoding
         val JSON_CHARSET: Charset = Charset.forName("UTF-8")
-        val JSON_FIELD_REGION_NAME = "FIELD_REGION_NAME"
+        const val JSON_FIELD_REGION_NAME = "FIELD_REGION_NAME"
     }
 
-    val events: BehaviorSubject<DownloadRegionEvent> = BehaviorSubject.createDefault(DownloadRegionEvent.Idle)
+    private val events: BehaviorSubject<DownloadRegionEvent> = BehaviorSubject.createDefault(DownloadRegionEvent.Idle)
 
-    fun isNotRunning(): Boolean {
-        val lastEvent = events.value
-        return lastEvent is DownloadRegionEvent.Idle ||
-                lastEvent is DownloadRegionEvent.Done
-    }
+    fun observeDownloadEvents(): Observable<DownloadRegionEvent> = events
 
-    fun isRunning() = !isNotRunning()
+    fun isRunning() = events.value !is DownloadRegionEvent.Idle
 
     fun execute(regionName: String,
                 definition: OfflineTilePyramidRegionDefinition) {
@@ -36,36 +34,60 @@ class DownloadRegionUseCase(val offlineManager: OfflineManager) {
     private fun executeImpl(regionName: String,
                             definition: OfflineTilePyramidRegionDefinition): Observable<DownloadRegionEvent> {
 
-        // Build a JSONObject using the user-defined offline region title,
-        // convert it into string, and use it to create a metadata variable.
-        // The metadata variable will later be passed to createOfflineRegion()
-
         val metadata: ByteArray
         try {
             metadata = constructMetadata(regionName)
         } catch (exc: java.lang.Exception) {
-            val readableMessage = "Metadata error: ${exc.localizedMessage}"
-            return Observable.fromCallable { DownloadRegionEvent.Error(regionName, readableMessage, exc) }
+            return Observable.error() { RegionDownloadException.MetadataError(regionName, exc) }
         }
 
-        // Create the offline region and launch the download
-        //todo: current offlineManager implementation does not support cancellation
+        return getRegionsUseCase.execute()
+                .toObservable()
+                .flatMap { existingRegions ->
+                    for (region in existingRegions) {
+                        val regionNamed = getRegionName(region)
+                        println("region $regionName, region iterated $regionNamed")
+                        if (regionName == regionNamed) {
+                            return@flatMap regionNameExistsError(region)
+                        }
+                    }
+                    return@flatMap download(regionName, metadata, definition)
+                }
+    }
+
+    private fun regionNameExistsError(region: OfflineRegion): Observable<DownloadRegionEvent> {
+        val exception = RegionDownloadException.RegionNameExists(region)
+        return Observable.error<DownloadRegionEvent>(exception)
+    }
+
+    fun getRegionName(offlineRegion: OfflineRegion): String {
+        return try {
+            val metadata = offlineRegion.metadata
+            val json = String(metadata, JSON_CHARSET)
+            val jsonObject = JSONObject(json)
+            jsonObject.getString(JSON_FIELD_REGION_NAME)
+        } catch (exception: Exception) {
+            Timber.e("Failed to decode metadata: %s", exception.message)
+            String.format("region id: %d", offlineRegion.id)
+        }
+    }
+
+    private fun download(regionName: String,
+                         metadata: ByteArray,
+                         definition: OfflineTilePyramidRegionDefinition): Observable<DownloadRegionEvent> {
         return Observable.create { emitter ->
 
-            offlineManager.createOfflineRegion(
-                    definition,
-                    metadata,
-                    object : OfflineManager.CreateOfflineRegionCallback {
-                        override fun onCreate(offlineRegion: OfflineRegion) {
-                            Timber.d("Offline region created: %s", regionName)
-                            startDownload(emitter, offlineRegion, regionName)
-                        }
+            offlineManager.createOfflineRegion(definition, metadata, object : OfflineManager.CreateOfflineRegionCallback {
+                override fun onCreate(offlineRegion: OfflineRegion) {
+                    Timber.d("Offline region created: %s", regionName)
+                    startDownload(emitter, offlineRegion, regionName)
+                }
 
-                        override fun onError(error: String) {
-                            Timber.e("Error: %s", error)
-                            emitter.onError(CreateOfflineRegionException(error))
-                        }
-                    })
+                override fun onError(error: String) {
+                    Timber.e("Error: %s", error)
+                    emitter.onError(RegionDownloadException.CreateRegionError(error))
+                }
+            })
         }
     }
 
@@ -86,37 +108,40 @@ class DownloadRegionUseCase(val offlineManager: OfflineManager) {
         else
             0.0
 
-        // Log what is being currently downloaded
-        Timber.d(
-                "%s/%s resources; %s bytes downloaded.",
-                (status.completedResourceCount).toString(),
-                (status.requiredResourceCount).toString(),
-                (status.completedResourceSize).toString()
-        )
+        val percentageInt = percentage.toInt()
 
-        // Switch to determinate state
-        emitter.onNext(DownloadRegionEvent.Downloading(regionName, percentage))
+        //avoid duplicate progresses during casting
+        if (percentageInt != lastPercentageSpotted) {
+            Timber.d("%s/%s resources; %s bytes downloaded.",
+                    (status.completedResourceCount).toString(),
+                    (status.requiredResourceCount).toString(),
+                    (status.completedResourceSize).toString())
+            Timber.d("percentage downloaded $percentageInt")
+            lastPercentageSpotted = percentageInt
+            emitter.onNext(DownloadRegionEvent.Downloading(regionName, lastPercentageSpotted))
+        }
     }
+
+    @Volatile
+    private var lastPercentageSpotted: Int = 0
 
     private fun startDownload(emitter: ObservableEmitter<DownloadRegionEvent>,
                               offlineRegion: OfflineRegion,
                               regionName: String) {
-        // Set up an observer to handle download progress and
-        // notify the user when the region is finished downloading
         offlineRegion.setObserver(object : OfflineRegion.OfflineRegionObserver {
             override fun onStatusChanged(status: OfflineRegionStatus) {
                 if (emitter.isDisposed) {
-                    //todo: cancel download
+                    //todo: cancel download, but current implementation of mapBox
+                    // can only pause it
 
                     return
                 }
 
                 if (status.isComplete) {
-                    // Download complete
-                    emitter.onNext(DownloadRegionEvent.Done(regionName))
+                    //reset last seen percentage
+                    lastPercentageSpotted = 0
+                    emitter.onNext(DownloadRegionEvent.Done(regionName, System.currentTimeMillis()))
                     emitter.onComplete()
-
-                    return
                 } else if (status.isRequiredResourceCountPrecise) {
                     emitDownloadStep(regionName, emitter, status)
                 }
@@ -126,7 +151,7 @@ class DownloadRegionUseCase(val offlineManager: OfflineManager) {
                 Timber.e("onError reason: %s", error.reason)
                 Timber.e("onError message: %s", error.message)
                 if (!emitter.isDisposed) {
-                    emitter.onError(OfflineRegionErrorException(error))
+                    emitter.onError(RegionDownloadException.RegionError(error))
                 }
             }
 
@@ -139,6 +164,7 @@ class DownloadRegionUseCase(val offlineManager: OfflineManager) {
         })
 
         // Change the region state - this line triggers downloading
+        //state INACITVE pauses it
         offlineRegion.setDownloadState(OfflineRegion.STATE_ACTIVE)
     }
 }

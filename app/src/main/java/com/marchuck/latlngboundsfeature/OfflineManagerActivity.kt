@@ -2,32 +2,22 @@ package com.marchuck.latlngboundsfeature
 
 import android.app.AlertDialog
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.support.v7.app.AppCompatActivity
 import android.view.View
 import android.widget.EditText
 import android.widget.Toast
-
 import com.mapbox.mapboxsdk.camera.CameraPosition
 import com.mapbox.mapboxsdk.camera.CameraUpdateFactory
 import com.mapbox.mapboxsdk.maps.MapboxMap
 import com.mapbox.mapboxsdk.maps.Style
 import com.mapbox.mapboxsdk.maps.Style.*
-import com.mapbox.mapboxsdk.offline.OfflineManager
-import com.mapbox.mapboxsdk.offline.OfflineRegion
 import com.mapbox.mapboxsdk.offline.OfflineTilePyramidRegionDefinition
 import com.marchuck.latlngboundsfeature.domain.*
 import io.reactivex.android.schedulers.AndroidSchedulers
 import io.reactivex.disposables.SerialDisposable
 import io.reactivex.schedulers.Schedulers
 import kotlinx.android.synthetic.main.activity_offline_manager.*
-
-import org.json.JSONObject
-import timber.log.Timber
-import java.nio.charset.Charset
-
-import java.util.ArrayList
+import java.util.*
 
 
 /**
@@ -35,48 +25,30 @@ import java.util.ArrayList
  */
 class OfflineManagerActivity : AppCompatActivity() {
 
-    // UI elements
     private var map: MapboxMap? = null
-
-    private var isEndNotified: Boolean = false
+    var toast: Toast? = null
     private var regionSelected: Int = 0
 
+    private val downloadOfflineMapsUseCase: DownloadRegionUseCase by lazy { App.getInstance(this).downloadOfflineMapsUseCase }
+    private val deleteRegionUseCase = DeleteRegionUseCase()
+    private val stylesProvider by lazy { StylesProvider(AndroidResourceRepository(resources)) }
+    private val getRegionsUseCase by lazy { App.getInstance(this).getRegionsUseCase }
 
-    var downloadOfflineMapsUseCase: DownloadRegionUseCase? = null
-
-    val deleteRegionUseCase = DeleteRegionUseCase()
-    val getRegionsUseCase by lazy { GetRegionsUseCase(OfflineManager.getInstance(this)) }
-
-    var toast: Toast? = null
-    val handler by lazy { Handler(Looper.getMainLooper()) }
-
-    val renderDownloadStatusDisposable = SerialDisposable()
-    val getRegionsDisposable = SerialDisposable()
-    val deleteRegionDisposable = SerialDisposable()
+    private val renderDownloadStatusDisposable = SerialDisposable()
+    private val getRegionsDisposable = SerialDisposable()
+    private val deleteRegionDisposable = SerialDisposable()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        downloadOfflineMapsUseCase = App.getInstance(this).downloadOfflineMapsUseCase
-
-        // This contains the MapView in XML and needs to be called after the access token is configured.
         setContentView(R.layout.activity_offline_manager)
 
-        // Set up the MapView
         mapView.onCreate(savedInstanceState)
         mapView.getMapAsync { mapboxMap ->
             map = mapboxMap
 
             mapboxMap.setStyle(MAPBOX_STREETS) {
-                // Assign overlay_view for later use
-
-                // Set up the offlineManager --already setup because of lazy init
-
-                // Bottom navigation bar button clicks are handled here.
-                // Download offline button
                 download_button.setOnClickListener { downloadRegionDialog() }
 
-                // List offline regions
                 list_button.setOnClickListener { renderAlreadyDownloadedRegionsList() }
             }
 
@@ -85,47 +57,11 @@ class OfflineManagerActivity : AppCompatActivity() {
             }
         }
 
-        if (downloadOfflineMapsUseCase?.isRunning() == true) {
+        if (downloadOfflineMapsUseCase.isRunning()) {
             observeDownloadEvents()
         }
     }
 
-    private fun observeDownloadEvents() {
-        renderDownloadStatusDisposable.set(downloadOfflineMapsUseCase?.events
-                ?.observeOn(AndroidSchedulers.mainThread())?.subscribe({
-
-                    when (it) {
-                        is DownloadRegionEvent.Downloading -> {
-                            overlay_view.visibility = View.VISIBLE
-                            showToast("${it.regionName} download in progress...\n${it.progress} %")
-                        }
-                        is DownloadRegionEvent.Done -> {
-                            overlay_view.visibility = View.GONE
-                            showToast("${it.regionName} download done")
-                        }
-                        is DownloadRegionEvent.Idle -> {
-                            overlay_view.visibility = View.GONE
-
-                        }
-                        is DownloadRegionEvent.Error -> {
-                            overlay_view.visibility = View.GONE
-                            showToast("${it.regionName} download error: ${it.readableMessage}")
-                        }
-
-                        is DownloadRegionEvent.TileCountLimitExceeded -> {
-                            overlay_view.visibility = View.GONE
-                            showToast("exceeded limit of downloaded tiles. please contact sales")
-                        }
-                    }
-
-                }, {
-                    showToast("unrecognized error")
-
-                })
-        )
-    }
-
-    // Override Activity lifecycle methods
     public override fun onResume() {
         super.onResume()
         mapView.onResume()
@@ -164,22 +100,52 @@ class OfflineManagerActivity : AppCompatActivity() {
         mapView.onLowMemory()
     }
 
+    private fun observeDownloadEvents() {
+        renderDownloadStatusDisposable.set(downloadOfflineMapsUseCase
+                .observeDownloadEvents()
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe({
+
+                    when (it) {
+                        is DownloadRegionEvent.Downloading -> {
+                            overlay_view.visibility = View.VISIBLE
+
+                            val formattedProgress = String.format("%.2f", it.progress.toFloat())
+
+                            showToast("${it.regionName} download in progress...\n $formattedProgress %")
+                        }
+                        is DownloadRegionEvent.Done -> {
+                            overlay_view.visibility = View.GONE
+                            showToast("${it.regionName} download done")
+                        }
+                        is DownloadRegionEvent.Idle -> {
+                            overlay_view.visibility = View.GONE
+                        }
+                        is DownloadRegionEvent.Error -> {
+                            overlay_view.visibility = View.GONE
+                            showToast("${it.regionName} download error: ${it.readableMessage}")
+                            it.throwable.printStackTrace()
+                        }
+
+                        is DownloadRegionEvent.TileCountLimitExceeded -> {
+                            overlay_view.visibility = View.GONE
+                            showToast("exceeded limit of downloaded tiles. please contact sales")
+                        }
+                    }
+
+                }, {
+                    overlay_view.visibility = View.GONE
+                    showToast("unrecognized error: ${it.message}")
+                    it.printStackTrace()
+
+                })
+        )
+    }
+
     private fun toggleLayer(mapboxMap: MapboxMap, button: View) {
         var index = button.tag as? Int ?: 0
 
-        val stylesAndNames = arrayListOf(
-                MAPBOX_STREETS to "streets",
-                OUTDOORS to "outdoors",
-                LIGHT to "light",
-                DARK to "dark",
-                getString(R.string.style_satellite) to "satellite",
-                SATELLITE_STREETS to "satellite streets",
-                TRAFFIC_DAY to "traffic day",
-                TRAFFIC_NIGHT to "traffic night",
-                getString(R.string.style_greenspace) to "greenspace",
-                getString(R.string.style_aerial) to "aerial",
-                getString(R.string.style_night) to "night"
-        )
+        val stylesAndNames = stylesProvider.provideStyles()
         index = (index + 1) % stylesAndNames.size
         button.tag = index
 
@@ -189,23 +155,22 @@ class OfflineManagerActivity : AppCompatActivity() {
         mapboxMap.setStyle(style)
     }
 
-
     private fun downloadRegionDialog() {
         val builder = AlertDialog.Builder(this@OfflineManagerActivity)
 
         val regionNameEdit = EditText(this@OfflineManagerActivity)
-        regionNameEdit.hint = getString(R.string.set_region_name_hint)
+        regionNameEdit.hint = "specify region name"
 
         // Build the dialog box
         builder.setTitle("Download region")
                 .setView(regionNameEdit)
-                .setMessage("Enter region name")
+                .setMessage("Whole screen bounds will be downloaded")
                 .setPositiveButton(
-                        getString(R.string.dialog_positive_button)
+                        "Download"
                 ) { dialog, which ->
                     val regionName = regionNameEdit.text.toString()
                     if (regionName.isEmpty()) {
-                        showToast(getString(R.string.dialog_toast))
+                        showToast("Please enter non-empty value")
                     } else {
                         downloadRegion(regionName)
                     }
@@ -217,7 +182,6 @@ class OfflineManagerActivity : AppCompatActivity() {
     }
 
     private fun downloadRegion(regionName: String) {
-
         val styleUrl = map!!.style!!.url
         val bounds = map!!.projection.visibleRegion.latLngBounds
         val minZoom = map!!.cameraPosition.zoom
@@ -227,7 +191,7 @@ class OfflineManagerActivity : AppCompatActivity() {
 
         overlay_view.visibility = View.VISIBLE
 
-        downloadOfflineMapsUseCase?.execute(regionName, definition)
+        downloadOfflineMapsUseCase.execute(regionName, definition)
         observeDownloadEvents()
     }
 
@@ -250,8 +214,9 @@ class OfflineManagerActivity : AppCompatActivity() {
         }
 
         val offlineRegionsNames = ArrayList<String>()
+
         for (offlineRegion in offlineRegions) {
-            offlineRegionsNames.add(getRegionName(offlineRegion))
+            offlineRegionsNames.add(downloadOfflineMapsUseCase.getRegionName(offlineRegion))
         }
         val items = offlineRegionsNames.toTypedArray<CharSequence>()
 
@@ -294,31 +259,10 @@ class OfflineManagerActivity : AppCompatActivity() {
         dialog.show()
     }
 
-    private fun getRegionName(offlineRegion: OfflineRegion): String {
-        return try {
-            val metadata = offlineRegion.metadata
-            val json = String(metadata, Charset.forName(JSON_CHARSET))
-            val jsonObject = JSONObject(json)
-            jsonObject.getString(JSON_FIELD_REGION_NAME)
-        } catch (exception: Exception) {
-            Timber.e("Failed to decode metadata: %s", exception.message)
-            String.format("region id: %d", offlineRegion.id)
-        }
-    }
 
     private fun showToast(message: String) {
         toast?.cancel()
         toast = Toast.makeText(this, message, Toast.LENGTH_SHORT)
         toast?.show()
     }
-
-    companion object {
-
-        private val TAG = "OffManActivity"
-
-        val JSON_CHARSET = "UTF-8"
-        val JSON_FIELD_REGION_NAME = "FIELD_REGION_NAME"
-    }
-
-
 }
