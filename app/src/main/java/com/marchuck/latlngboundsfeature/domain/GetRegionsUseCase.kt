@@ -7,7 +7,7 @@ import io.reactivex.Single
 
 typealias OfflineRegions = ArrayList<OfflineRegion>
 
-class OfflineRegionsUseCase(val offlineManager: OfflineManager) {
+class GetRegionsUseCase(val offlineManager: OfflineManager) {
 
     fun execute(): Single<OfflineRegions> {
         return Single.create { emitter ->

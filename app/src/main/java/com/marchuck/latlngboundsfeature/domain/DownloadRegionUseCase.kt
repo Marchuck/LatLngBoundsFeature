@@ -5,6 +5,7 @@ import com.marchuck.latlngboundsfeature.domain.exceptions.CreateOfflineRegionExc
 import com.marchuck.latlngboundsfeature.domain.exceptions.OfflineRegionErrorException
 import io.reactivex.Observable
 import io.reactivex.ObservableEmitter
+import io.reactivex.subjects.BehaviorSubject
 import org.json.JSONObject
 import timber.log.Timber
 import java.nio.charset.Charset
@@ -17,8 +18,23 @@ class DownloadRegionUseCase(val offlineManager: OfflineManager) {
         val JSON_FIELD_REGION_NAME = "FIELD_REGION_NAME"
     }
 
+    val events: BehaviorSubject<DownloadRegionEvent> = BehaviorSubject.createDefault(DownloadRegionEvent.Idle)
+
+    fun isNotRunning(): Boolean {
+        val lastEvent = events.value
+        return lastEvent is DownloadRegionEvent.Idle ||
+                lastEvent is DownloadRegionEvent.Done
+    }
+
+    fun isRunning() = !isNotRunning()
+
     fun execute(regionName: String,
-                definition: OfflineTilePyramidRegionDefinition): Observable<DownloadRegionEvent> {
+                definition: OfflineTilePyramidRegionDefinition) {
+        executeImpl(regionName, definition).subscribe(events)
+    }
+
+    private fun executeImpl(regionName: String,
+                            definition: OfflineTilePyramidRegionDefinition): Observable<DownloadRegionEvent> {
 
         // Build a JSONObject using the user-defined offline region title,
         // convert it into string, and use it to create a metadata variable.
@@ -29,7 +45,7 @@ class DownloadRegionUseCase(val offlineManager: OfflineManager) {
             metadata = constructMetadata(regionName)
         } catch (exc: java.lang.Exception) {
             val readableMessage = "Metadata error: ${exc.localizedMessage}"
-            return Observable.fromCallable { DownloadRegionEvent.Error(readableMessage, exc) }
+            return Observable.fromCallable { DownloadRegionEvent.Error(regionName, readableMessage, exc) }
         }
 
         // Create the offline region and launch the download
@@ -89,10 +105,17 @@ class DownloadRegionUseCase(val offlineManager: OfflineManager) {
         // notify the user when the region is finished downloading
         offlineRegion.setObserver(object : OfflineRegion.OfflineRegionObserver {
             override fun onStatusChanged(status: OfflineRegionStatus) {
+                if (emitter.isDisposed) {
+                    //todo: cancel download
+
+                    return
+                }
+
                 if (status.isComplete) {
                     // Download complete
                     emitter.onNext(DownloadRegionEvent.Done(regionName))
                     emitter.onComplete()
+
                     return
                 } else if (status.isRequiredResourceCountPrecise) {
                     emitDownloadStep(regionName, emitter, status)
@@ -102,12 +125,16 @@ class DownloadRegionUseCase(val offlineManager: OfflineManager) {
             override fun onError(error: OfflineRegionError) {
                 Timber.e("onError reason: %s", error.reason)
                 Timber.e("onError message: %s", error.message)
-                emitter.onError(OfflineRegionErrorException(error))
+                if (!emitter.isDisposed) {
+                    emitter.onError(OfflineRegionErrorException(error))
+                }
             }
 
             override fun mapboxTileCountLimitExceeded(limit: Long) {
                 Timber.e("Mapbox tile count limit exceeded: %s", limit)
-                emitter.onNext(DownloadRegionEvent.TileCountLimitExceeded(limit))
+                if (!emitter.isDisposed) {
+                    emitter.onNext(DownloadRegionEvent.TileCountLimitExceeded(limit))
+                }
             }
         })
 
