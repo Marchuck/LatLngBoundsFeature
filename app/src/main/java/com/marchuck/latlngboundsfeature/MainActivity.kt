@@ -2,15 +2,8 @@ package com.marchuck.latlngboundsfeature
 
 import android.os.Bundle
 import android.support.v7.app.AppCompatActivity
-import com.mapbox.mapboxsdk.camera.CameraUpdateFactory
-import com.mapbox.mapboxsdk.geometry.LatLng
-import com.mapbox.mapboxsdk.geometry.LatLngBounds
 import com.mapbox.mapboxsdk.maps.MapView
-import com.mapbox.mapboxsdk.maps.MapboxMap
-import com.mapbox.mapboxsdk.maps.Style
-import io.reactivex.android.schedulers.AndroidSchedulers
-import io.reactivex.subjects.PublishSubject
-import java.util.concurrent.TimeUnit
+
 
 /**
  * @author Lukasz Marczak

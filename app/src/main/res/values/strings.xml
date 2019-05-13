@@ -1,3 +1,7 @@
 <resources>
     <string name="app_name">LatLngBoundsFeature</string>
+
+    <string name="set_region_name_hint">Set region name</string>
+    <string name="dialog_positive_button">Add</string>
+    <string name="dialog_toast">Please enter non-empty value</string>
 </resources>

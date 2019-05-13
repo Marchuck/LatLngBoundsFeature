@@ -15,49 +15,53 @@ import java.util.concurrent.TimeUnit
 
 class MapBoxObserver(val mapView: MapView?, val boundsProvider: BoundsProvider) : LifecycleObserver {
 
-    val mapEventsDisposable = SerialDisposable()
+    private val mapEventsDisposable = SerialDisposable()
 
     private val subject: PublishSubject<Boolean> = PublishSubject.create()
     private val ADJUST_TO_BOUNDS_TIME = 100
-
 
     @OnLifecycleEvent(Lifecycle.Event.ON_CREATE)
     fun onCreate() {
         mapView?.getMapAsync { mapboxMap ->
 
-            mapboxMap.setStyle(Style.MAPBOX_STREETS) {
-            }
+            val url = mapView.context.resources.getString(R.string.style_greenspace)
+            val style = Style.Builder().fromUrl(url)
+            mapboxMap.setStyle(style) {
 
-            val bounds = boundsProvider.provideBounds()
+                val bounds = boundsProvider.provideBounds()
 
-            mapboxMap.setLatLngBoundsForCameraTarget(bounds)
+                mapboxMap.setLatLngBoundsForCameraTarget(bounds)
 
-            scheduleZoomIfNeeded(mapboxMap, bounds)
+                mapboxMap.easeCamera(CameraUpdateFactory.newLatLngBounds(bounds, 0), ADJUST_TO_BOUNDS_TIME)
+
 //
 //            //disable zooming out of England/Ireland/France area
-            mapboxMap.setMinZoomPreference(4.0)
+//                mapboxMap.setMinZoomPreference(4.0)
 //            //https://docs.mapbox.com/android/maps/overview/events/
-            mapboxMap.addOnCameraMoveListener {
+                mapboxMap.addOnCameraMoveListener {
+                    scheduleZoomIfNeeded(mapboxMap, bounds)
+                }
+                mapboxMap.addOnCameraIdleListener {
+                    scheduleZoomIfNeeded(mapboxMap, bounds)
+                }
+                mapboxMap.addOnCameraMoveListener {
+                    scheduleZoomIfNeeded(mapboxMap, bounds)
+                }
+                mapboxMap.addOnCameraMoveStartedListener {
+                    scheduleZoomIfNeeded(mapboxMap, bounds)
+                }
+                mapEventsDisposable.set(subject.throttleFirst(ADJUST_TO_BOUNDS_TIME.toLong(), TimeUnit.MILLISECONDS)
+                    .observeOn(AndroidSchedulers.mainThread())
+                    .filter { it }
+                    .subscribe({
+                        mapboxMap.easeCamera(CameraUpdateFactory.newLatLngBounds(bounds, 0), ADJUST_TO_BOUNDS_TIME)
+                    }, {
+                    })
+                )
                 scheduleZoomIfNeeded(mapboxMap, bounds)
-            }
-            mapboxMap.addOnCameraIdleListener {
-                scheduleZoomIfNeeded(mapboxMap, bounds)
-            }
-            mapboxMap.addOnCameraMoveListener {
-                scheduleZoomIfNeeded(mapboxMap, bounds)
-            }
-            mapboxMap.addOnCameraMoveStartedListener {
-                scheduleZoomIfNeeded(mapboxMap, bounds)
+
             }
 
-            mapEventsDisposable.set(subject.throttleFirst(ADJUST_TO_BOUNDS_TIME.toLong(), TimeUnit.MILLISECONDS)
-                .observeOn(AndroidSchedulers.mainThread())
-                .filter { it }
-                .subscribe({
-                    mapboxMap.easeCamera(CameraUpdateFactory.newLatLngBounds(bounds, 0), ADJUST_TO_BOUNDS_TIME)
-                }, {
-                })
-            )
         }
     }
 
@@ -69,6 +73,7 @@ class MapBoxObserver(val mapView: MapView?, val boundsProvider: BoundsProvider) 
         val visibleBounds = mapboxMap.projection.visibleRegion.latLngBounds
         return !bounds.contains(visibleBounds)
     }
+
     @OnLifecycleEvent(Lifecycle.Event.ON_RESUME)
     fun onResume() {
         mapView?.onResume()
