@@ -1,6 +1,10 @@
 package com.marchuck.latlngboundsfeature.domain
 
-import com.mapbox.mapboxsdk.offline.*
+import com.mapbox.mapboxsdk.offline.OfflineRegion
+import com.mapbox.mapboxsdk.offline.OfflineManager
+import com.mapbox.mapboxsdk.offline.OfflineTilePyramidRegionDefinition
+import com.mapbox.mapboxsdk.offline.OfflineRegionStatus
+import com.mapbox.mapboxsdk.offline.OfflineRegionError
 import com.marchuck.latlngboundsfeature.domain.exceptions.RegionDownloadException
 import io.reactivex.Observable
 import io.reactivex.ObservableEmitter
@@ -8,9 +12,10 @@ import io.reactivex.subjects.BehaviorSubject
 import org.json.JSONObject
 import timber.log.Timber
 import java.nio.charset.Charset
+import java.util.concurrent.TimeUnit
 
 /**
- * todo: check if it works with process kill
+ * todo: check if it works with process kill and introduce additional states when internet connectivity lost
  */
 class DownloadRegionUseCase(private val offlineManager: OfflineManager,
                             private val getRegionsUseCase: GetRegionsUseCase) {
@@ -28,7 +33,16 @@ class DownloadRegionUseCase(private val offlineManager: OfflineManager,
 
     fun execute(regionName: String,
                 definition: OfflineTilePyramidRegionDefinition) {
-        executeImpl(regionName, definition).subscribe(events)
+        val unmanagableDisposable = executeImpl(regionName, definition)
+                .subscribe({
+                    events.onNext(it)
+                }, {
+                    if (it is RegionDownloadException) {
+                        events.onNext(DownloadRegionEvent.Error(regionName, it))
+                    } else {
+                        events.onNext(DownloadRegionEvent.Error(regionName, RegionDownloadException.UnrecognizedError(it)))
+                    }
+                })
     }
 
     private fun executeImpl(regionName: String,
@@ -38,7 +52,7 @@ class DownloadRegionUseCase(private val offlineManager: OfflineManager,
         try {
             metadata = constructMetadata(regionName)
         } catch (exc: java.lang.Exception) {
-            return Observable.error() { RegionDownloadException.MetadataError(regionName, exc) }
+            return Observable.error(RegionDownloadException.MetadataError(regionName, exc))
         }
 
         return getRegionsUseCase.execute()
@@ -48,16 +62,12 @@ class DownloadRegionUseCase(private val offlineManager: OfflineManager,
                         val regionNamed = getRegionName(region)
                         println("region $regionName, region iterated $regionNamed")
                         if (regionName == regionNamed) {
-                            return@flatMap regionNameExistsError(region)
+                            val exception = RegionDownloadException.RegionNameExists(region)
+                            return@flatMap Observable.error<DownloadRegionEvent>(exception)
                         }
                     }
                     return@flatMap download(regionName, metadata, definition)
                 }
-    }
-
-    private fun regionNameExistsError(region: OfflineRegion): Observable<DownloadRegionEvent> {
-        val exception = RegionDownloadException.RegionNameExists(region)
-        return Observable.error<DownloadRegionEvent>(exception)
     }
 
     fun getRegionName(offlineRegion: OfflineRegion): String {
@@ -103,31 +113,51 @@ class DownloadRegionUseCase(private val offlineManager: OfflineManager,
                                  emitter: ObservableEmitter<DownloadRegionEvent>,
                                  status: OfflineRegionStatus) {
 
-        val percentage = if (status.requiredResourceCount >= 0)
-            (100.0 * status.completedResourceCount / status.requiredResourceCount)
-        else
-            0.0
-
-        val percentageInt = percentage.toInt()
+        val percentage = calculateProgress(status)
 
         //avoid duplicate progresses during casting
-        if (percentageInt != lastPercentageSpotted) {
+        if (percentage != lastPercentageSpotted) {
             Timber.d("%s/%s resources; %s bytes downloaded.",
                     (status.completedResourceCount).toString(),
                     (status.requiredResourceCount).toString(),
                     (status.completedResourceSize).toString())
-            Timber.d("percentage downloaded $percentageInt")
-            lastPercentageSpotted = percentageInt
+            Timber.d("percentage downloaded $percentage")
+            lastPercentageSpotted = percentage
+
             emitter.onNext(DownloadRegionEvent.Downloading(regionName, lastPercentageSpotted))
+        } else {
+            val currentTime = System.currentTimeMillis()
+            val difference = currentTime - lastPercentageTime
+            val seconds = TimeUnit.MILLISECONDS.toSeconds(difference)
+            if (seconds >= 30) {
+                emitter.onError(RegionDownloadException.Timeout)
+            }
         }
+    }
+
+    private fun calculateProgress(status: OfflineRegionStatus): Int {
+        return if (status.requiredResourceCount >= 0)
+            (100.0 * status.completedResourceCount / status.requiredResourceCount).toInt()
+        else
+            0
     }
 
     @Volatile
     private var lastPercentageSpotted: Int = 0
+        set(value) {
+            field = value
+            lastPercentageTime = System.currentTimeMillis()
+        }
+
+    @Volatile
+    private var lastPercentageTime: Long = 0L
 
     private fun startDownload(emitter: ObservableEmitter<DownloadRegionEvent>,
                               offlineRegion: OfflineRegion,
                               regionName: String) {
+
+        lastPercentageSpotted = 0
+
         offlineRegion.setObserver(object : OfflineRegion.OfflineRegionObserver {
             override fun onStatusChanged(status: OfflineRegionStatus) {
                 if (emitter.isDisposed) {
